@@ -2,7 +2,7 @@ var BASE = 'https://movies.discoveryftp.net';
 var TMDB_KEY = 'b5ce7bb7d827e838685ef4b98ff4941f';
 
 function norm(s) {
-  return (s || '').toLowerCase().replace(/&amp;/g, 'and').replace(/[^a-z0-9]+/g, '');
+  return (s || '').toLowerCase().replace(/&amp;/g, 'and').replace(/^the\s+/, '').replace(/[^a-z0-9]+/g, '');
 }
 
 function lastSeg(u) {
@@ -10,32 +10,14 @@ function lastSeg(u) {
 }
 
 function getMeta(id) {
-  if (TMDB_KEY && TMDB_KEY !== 'YOUR_TMDB_V3_KEY') {
-    return fetch('https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_KEY)
-      .then(function (r) { return r.json(); })
-      .then(function (t) {
-        return {
-          title: t.title || '',
-          alt: t.original_title || '',
-          year: (t.release_date || '').slice(0, 4),
-          poster: lastSeg(t.poster_path)
-        };
-      });
-  }
-  return fetch('https://www.themoviedb.org/movie/' + id + '?language=en-US', {
-    headers: { 'User-Agent': 'Mozilla/5.0' }
-  })
-    .then(function (r) { return r.text(); })
-    .then(function (html) {
-      var og = (html.match(/<meta property="og:title" content="([^"]+)"/) || [])[1] || '';
-      og = og.replace(/&amp;/g, '&').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"');
-      var img = (html.match(/<meta property="og:image" content="([^"]+)"/) || [])[1] || '';
-      var m = og.match(/^(.*?)\s*\((\d{4})[^)]*\)\s*$/);
+  return fetch('https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_KEY)
+    .then(function (r) { return r.json(); })
+    .then(function (t) {
       return {
-        title: m ? m[1] : og,
-        alt: '',
-        year: m ? m[2] : '',
-        poster: lastSeg(img)
+        title: t.title || '',
+        alt: t.original_title || '',
+        year: (t.release_date || '').slice(0, 4),
+        poster: lastSeg(t.poster_path)
       };
     });
 }
@@ -49,12 +31,13 @@ function search(q) {
         var id = (p.match(/href=["']\/m\/view\/(\d+)["']/) || [])[1];
         if (!id) return;
         var img = (p.match(/<img[^>]+src=["']([^"']+)["']/i) || [])[1] || '';
-        var d = p.slice(p.indexOf('class="details"'));
+        var di = p.indexOf('class="details"');
+        var d = di >= 0 ? p.slice(p.indexOf('>', di) + 1) : p;
         var tokens = d.replace(/<[^>]+>/g, '|').split('|')
           .map(function (s) { return s.replace(/&amp;/g, '&').replace(/&#039;|&#39;/g, "'").trim(); })
           .filter(Boolean);
         var year = (tokens.join(' ').match(/(\d{4})-\d{2}-\d{2}/) || [])[1] || '';
-        out.push({ id: id, tokens: tokens, year: year, poster: lastSeg(img) });
+        out.push({ id: id, title: tokens[0] || '', tokens: tokens, year: year, poster: lastSeg(img) });
       });
       return out;
     });
@@ -62,9 +45,7 @@ function search(q) {
 
 function pick(res, t) {
   var names = [norm(t.title), norm(t.alt)].filter(Boolean);
-  function titleOk(r) {
-    return r.tokens.some(function (x) { return names.indexOf(norm(x)) !== -1; });
-  }
+  function titleOk(r) { return names.indexOf(norm(r.title)) !== -1; }
   function yearNear(r) {
     return r.year && t.year && Math.abs(parseInt(r.year, 10) - parseInt(t.year, 10)) <= 1;
   }
@@ -87,29 +68,71 @@ function files(html) {
   return out;
 }
 
-// DEBUG version: returns fake rows describing each stage
-function getStreams(tmdbId, mediaType) {
-  var log = [];
-  function out() {
-    return log.map(function (l, i) {
-      return { name: 'DBG', title: l, url: 'http://0.0.0.0/' + i, quality: 'DBG', provider: 'dflix' };
-    });
+function findHit(t, seen) {
+  var queries = [t.title];
+  var short = t.title.split(':')[0];
+  if (short !== t.title) queries.push(short);
+  var plain = t.title.replace(/[^a-zA-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (queries.indexOf(plain) === -1) queries.push(plain);
+  if (t.alt && queries.indexOf(t.alt) === -1) queries.push(t.alt);
+
+  function next(i) {
+    if (i >= queries.length) return Promise.resolve(null);
+    return search(queries[i]).then(function (res) {
+      res.forEach(function (r) { seen.push(r.title + ' (' + r.year + ')'); });
+      return pick(res, t) || next(i + 1);
+    }).catch(function () { return next(i + 1); });
   }
+  return next(0);
+}
+
+function getStreams(tmdbId, mediaType) {
+  if (mediaType === 'tv') return Promise.resolve([]);
+  var seen = [];
   return getMeta(tmdbId).then(function (t) {
-    log.push('1 meta: ' + t.title + ' | ' + t.year + ' | ' + t.poster);
-    return search(t.title).then(function (res) {
-      log.push('2 results: ' + res.length + ' | first: ' + (res[0] ? res[0].tokens.join('/') + ' ' + res[0].poster : 'none'));
-      var hit = pick(res, t);
-      log.push('3 hit: ' + (hit ? hit.id : 'none'));
-      if (!hit) return out();
-      return fetch(BASE + '/m/view/' + hit.id).then(function (r) { return r.text(); }).then(function (html) {
-        log.push('4 page len: ' + html.length + ' | files: ' + files(html.split('Cast And Crew')[0]).length);
-        return out();
+    if (!t.title) return [];
+    return findHit(t, seen).then(function (hit) {
+      if (!hit) {
+        return [{
+          name: 'DBG',
+          title: 'no match for "' + t.title + '" (' + t.year + '). site: ' + (seen.slice(0, 5).join(', ') || 'nothing'),
+          url: 'http://0.0.0.0/none',
+          quality: 'DBG',
+          provider: 'dflix'
+        }];
+      }
+      var page = BASE + '/m/view/' + hit.id;
+      return fetch(page).then(function (r) { return r.text(); }).then(function (html) {
+        var top = html.split('Cast And Crew')[0];
+        var links = files(top);
+        var others = [], dup = {}, re = /href=["']\/m\/view\/(\d+)["']/g, m;
+        while ((m = re.exec(top))) {
+          if (m[1] !== hit.id && !dup[m[1]]) { dup[m[1]] = 1; others.push(m[1]); }
+        }
+        return Promise.all(others.slice(0, 3).map(function (id) {
+          return fetch(BASE + '/m/view/' + id)
+            .then(function (r) { return r.text(); })
+            .then(function (h2) { return files(h2.split('Cast And Crew')[0]); })
+            .catch(function () { return []; });
+        })).then(function (more) {
+          more.forEach(function (a) { links = links.concat(a); });
+          var done = {};
+          return links.filter(function (u) { return !done[u] && (done[u] = 1); }).map(function (u) {
+            var q = (decodeURIComponent(u).match(/(2160|1080|720|480)p/i) || [])[0] || 'Unknown';
+            return {
+              name: 'DFLIX',
+              title: t.title + ' ' + q,
+              url: u,
+              quality: q,
+              headers: { Referer: page },
+              provider: 'dflix'
+            };
+          });
+        });
       });
     });
   }).catch(function (e) {
-    log.push('ERR: ' + e);
-    return out();
+    return [{ name: 'DBG', title: 'ERR: ' + e, url: 'http://0.0.0.0/err', quality: 'DBG', provider: 'dflix' }];
   });
 }
 
