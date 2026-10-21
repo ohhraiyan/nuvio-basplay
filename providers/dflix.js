@@ -1,5 +1,5 @@
 var BASE = 'https://movies.discoveryftp.net';
-var TMDB_KEY = 'b5ce7bb7d827e838685ef4b98ff4941f'; 
+var TMDB_KEY = 'b5ce7bb7d827e838685ef4b98ff4941f';
 
 function norm(s) {
   return (s || '').toLowerCase().replace(/&amp;/g, 'and').replace(/[^a-z0-9]+/g, '');
@@ -10,7 +10,7 @@ function lastSeg(u) {
 }
 
 function getMeta(id) {
-  if (TMDB_KEY) {
+  if (TMDB_KEY && TMDB_KEY !== 'YOUR_TMDB_V3_KEY') {
     return fetch('https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_KEY)
       .then(function (r) { return r.json(); })
       .then(function (t) {
@@ -87,60 +87,30 @@ function files(html) {
   return out;
 }
 
-function findHit(t) {
-  var queries = [t.title];
-  var short = t.title.split(':')[0];
-  if (short !== t.title) queries.push(short);
-  var plain = t.title.replace(/[^a-zA-Z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-  if (plain !== t.title && queries.indexOf(plain) === -1) queries.push(plain);
-  if (t.alt && queries.indexOf(t.alt) === -1) queries.push(t.alt);
-
-  function next(i) {
-    if (i >= queries.length) return Promise.resolve(null);
-    return search(queries[i]).then(function (res) {
-      return pick(res, t) || next(i + 1);
-    }).catch(function () { return next(i + 1); });
-  }
-  return next(0);
-}
-
+// DEBUG version: returns fake rows describing each stage
 function getStreams(tmdbId, mediaType) {
-  if (mediaType === 'tv') return Promise.resolve([]);
+  var log = [];
+  function out() {
+    return log.map(function (l, i) {
+      return { name: 'DBG', title: l, url: 'http://0.0.0.0/' + i, quality: 'DBG', provider: 'dflix' };
+    });
+  }
   return getMeta(tmdbId).then(function (t) {
-    if (!t.title) return [];
-    return findHit(t).then(function (hit) {
-      if (!hit) return [];
-      var page = BASE + '/m/view/' + hit.id;
-      return fetch(page).then(function (r) { return r.text(); }).then(function (html) {
-        var top = html.split('Cast And Crew')[0];
-        var links = files(top);
-        var others = [], seen = {}, re = /href=["']\/m\/view\/(\d+)["']/g, m;
-        while ((m = re.exec(top))) {
-          if (m[1] !== hit.id && !seen[m[1]]) { seen[m[1]] = 1; others.push(m[1]); }
-        }
-        return Promise.all(others.slice(0, 3).map(function (id) {
-          return fetch(BASE + '/m/view/' + id)
-            .then(function (r) { return r.text(); })
-            .then(function (h2) { return files(h2.split('Cast And Crew')[0]); })
-            .catch(function () { return []; });
-        })).then(function (more) {
-          more.forEach(function (a) { links = links.concat(a); });
-          var done = {};
-          return links.filter(function (u) { return !done[u] && (done[u] = 1); }).map(function (u) {
-            var q = (decodeURIComponent(u).match(/(2160|1080|720|480)p/i) || [])[0] || 'Unknown';
-            return {
-              name: 'DFLIX',
-              title: t.title + ' ' + q,
-              url: u,
-              quality: q,
-              headers: { Referer: page },
-              provider: 'dflix'
-            };
-          });
-        });
+    log.push('1 meta: ' + t.title + ' | ' + t.year + ' | ' + t.poster);
+    return search(t.title).then(function (res) {
+      log.push('2 results: ' + res.length + ' | first: ' + (res[0] ? res[0].tokens.join('/') + ' ' + res[0].poster : 'none'));
+      var hit = pick(res, t);
+      log.push('3 hit: ' + (hit ? hit.id : 'none'));
+      if (!hit) return out();
+      return fetch(BASE + '/m/view/' + hit.id).then(function (r) { return r.text(); }).then(function (html) {
+        log.push('4 page len: ' + html.length + ' | files: ' + files(html.split('Cast And Crew')[0]).length);
+        return out();
       });
     });
-  }).catch(function () { return []; });
+  }).catch(function (e) {
+    log.push('ERR: ' + e);
+    return out();
+  });
 }
 
 module.exports = { getStreams: getStreams };
