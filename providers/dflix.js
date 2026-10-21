@@ -1,18 +1,26 @@
 var BASE = 'https://movies.discoveryftp.net';
+var TMDB_KEY = 'b5ce7bb7d827e838685ef4b98ff4941f';
 
 function norm(s) {
   return (s || '').toLowerCase().replace(/&amp;/g, 'and').replace(/[^a-z0-9]+/g, '');
 }
 
-function getMeta(kind, id) {
-  return fetch('https://www.themoviedb.org/' + kind + '/' + id + '?language=en-US', {
+function getMeta(id) {
+  if (TMDB_KEY) {
+    return fetch('https://api.themoviedb.org/3/movie/' + id + '?api_key=' + TMDB_KEY)
+      .then(function (r) { return r.json(); })
+      .then(function (t) {
+        return { title: t.title || '', year: (t.release_date || '').slice(0, 4) };
+      });
+  }
+  return fetch('https://www.themoviedb.org/movie/' + id + '?language=en-US', {
     headers: { 'User-Agent': 'Mozilla/5.0' }
   })
     .then(function (r) { return r.text(); })
     .then(function (html) {
       var og = (html.match(/<meta property="og:title" content="([^"]+)"/) || [])[1] || '';
       og = og.replace(/&amp;/g, '&').replace(/&#x27;|&#39;/g, "'").replace(/&quot;/g, '"');
-      var m = og.match(/^(.*?)\s*\((?:TV Series\s*)?(\d{4})[^)]*\)\s*$/);
+      var m = og.match(/^(.*?)\s*\((\d{4})[^)]*\)\s*$/);
       return m ? { title: m[1], year: m[2] } : { title: og, year: '' };
     });
 }
@@ -22,60 +30,85 @@ function search(q) {
     .then(function (r) { return r.text(); })
     .then(function (html) {
       var out = [];
-      var parts = html.split('<div class="card"').slice(1);
-      parts.forEach(function (p) {
+      html.split('<div class="card"').slice(1).forEach(function (p) {
         var id = (p.match(/href=["']\/m\/view\/(\d+)["']/) || [])[1];
         if (!id) return;
         var d = p.slice(p.indexOf('class="details"'));
-        var text = d.replace(/<[^>]+>/g, '|').split('|')
-          .map(function (s) { return s.replace(/&amp;/g, '&').trim(); })
+        var tokens = d.replace(/<[^>]+>/g, '|').split('|')
+          .map(function (s) { return s.replace(/&amp;/g, '&').replace(/&#039;|&#39;/g, "'").trim(); })
           .filter(Boolean);
-        var date = (text.join(' ').match(/(\d{4})-\d{2}-\d{2}/) || [])[1] || '';
-        out.push({ id: id, title: text[0] || '', year: date });
+        var year = (tokens.join(' ').match(/(\d{4})-\d{2}-\d{2}/) || [])[1] || '';
+        out.push({ id: id, tokens: tokens, year: year });
       });
       return out;
     });
 }
 
+function pick(res, title, year) {
+  var nt = norm(title);
+  function has(r) {
+    return r.tokens.some(function (t) { return norm(t) === nt; });
+  }
+  return res.filter(function (r) { return has(r) && r.year === year; })[0]
+      || res.filter(has)[0];
+}
+
+function fix(src) {
+  src = src.replace(/&amp;/g, '&').replace(/ /g, '%20').replace(/\[/g, '%5B').replace(/\]/g, '%5D');
+  if (src.indexOf('//') === 0) src = 'https:' + src;
+  else if (src.charAt(0) === '/') src = BASE + src;
+  return src;
+}
+
+function files(html) {
+  var out = [], re = /href=["']([^"']+\.(?:mkv|mp4|m3u8))["']/gi, m;
+  while ((m = re.exec(html))) out.push(fix(m[1]));
+  return out;
+}
+
 function getStreams(tmdbId, mediaType) {
   if (mediaType === 'tv') return Promise.resolve([]);
-  return getMeta('movie', tmdbId)
-    .then(function (t) {
-      var title = t.title, year = t.year;
-      var short = title.split(':')[0];
-      return search(title).then(function (res) {
-        if (!res.length && short !== title) return search(short);
-        return res;
-      }).then(function (res) {
-        var nt = norm(title);
-        var hit = res.filter(function (r) { return norm(r.title) === nt && r.year === year; })[0]
-               || res.filter(function (r) { return norm(r.title) === nt; })[0];
+  return getMeta(tmdbId).then(function (t) {
+    var title = t.title, year = t.year, short = title.split(':')[0];
+    return search(title)
+      .then(function (res) {
+        var h = pick(res, title, year);
+        if (h || short === title) return h;
+        return search(short).then(function (r2) { return pick(r2, title, year) || pick(r2, short, year); });
+      })
+      .then(function (hit) {
         if (!hit) return [];
         var page = BASE + '/m/view/' + hit.id;
         return fetch(page).then(function (r) { return r.text(); }).then(function (html) {
-          var seen = {}, out = [];
-          var re = /(?:href|src)=["']([^"']+\.(?:mkv|mp4|m3u8)(?:\?[^"']*)?)["']/gi, m;
-          while ((m = re.exec(html))) {
-            var src = m[1].replace(/&amp;/g, '&').replace(/ /g, '%20');
-            if (src.indexOf('//') === 0) src = 'https:' + src;
-            else if (src.charAt(0) === '/') src = BASE + src;
-            if (seen[src]) continue;
-            seen[src] = 1;
-            var q = (decodeURIComponent(src).match(/(2160|1080|720|480)p/i) || [])[0] || 'Unknown';
-            out.push({
-              name: 'DFLIX',
-              title: title + ' ' + q,
-              url: src,
-              quality: q,
-              headers: { Referer: page },
-              provider: 'dflix'
-            });
+          var top = html.split('Cast And Crew')[0];
+          var links = files(top);
+          var others = [], seen = {}, re = /href=["']\/m\/view\/(\d+)["']/g, m;
+          while ((m = re.exec(top))) {
+            if (m[1] !== hit.id && !seen[m[1]]) { seen[m[1]] = 1; others.push(m[1]); }
           }
-          return out;
+          return Promise.all(others.slice(0, 3).map(function (id) {
+            return fetch(BASE + '/m/view/' + id)
+              .then(function (r) { return r.text(); })
+              .then(function (h2) { return files(h2.split('Cast And Crew')[0]); })
+              .catch(function () { return []; });
+          })).then(function (more) {
+            more.forEach(function (a) { links = links.concat(a); });
+            var done = {};
+            return links.filter(function (u) { return !done[u] && (done[u] = 1); }).map(function (u) {
+              var q = (decodeURIComponent(u).match(/(2160|1080|720|480)p/i) || [])[0] || 'Unknown';
+              return {
+                name: 'DFLIX',
+                title: title + ' ' + q,
+                url: u,
+                quality: q,
+                headers: { Referer: page },
+                provider: 'dflix'
+              };
+            });
+          });
         });
       });
-    })
-    .catch(function () { return []; });
+  }).catch(function () { return []; });
 }
 
 module.exports = { getStreams: getStreams };
