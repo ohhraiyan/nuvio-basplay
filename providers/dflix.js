@@ -68,7 +68,7 @@ function files(html) {
   return out;
 }
 
-function findHit(t, seen) {
+function findHit(t) {
   var queries = [t.title];
   var short = t.title.split(':')[0];
   if (short !== t.title) queries.push(short);
@@ -79,7 +79,6 @@ function findHit(t, seen) {
   function next(i) {
     if (i >= queries.length) return Promise.resolve(null);
     return search(queries[i]).then(function (res) {
-      res.forEach(function (r) { seen.push(r.title + ' (' + r.year + ')'); });
       return pick(res, t) || next(i + 1);
     }).catch(function () { return next(i + 1); });
   }
@@ -88,19 +87,10 @@ function findHit(t, seen) {
 
 function getStreams(tmdbId, mediaType) {
   if (mediaType === 'tv') return Promise.resolve([]);
-  var seen = [];
   return getMeta(tmdbId).then(function (t) {
     if (!t.title) return [];
-    return findHit(t, seen).then(function (hit) {
-      if (!hit) {
-        return [{
-          name: 'DBG',
-          title: 'no match for "' + t.title + '" (' + t.year + '). site: ' + (seen.slice(0, 5).join(', ') || 'nothing'),
-          url: 'http://0.0.0.0/none',
-          quality: 'DBG',
-          provider: 'dflix'
-        }];
-      }
+    return findHit(t).then(function (hit) {
+      if (!hit) return [];
       var page = BASE + '/m/view/' + hit.id;
       return fetch(page).then(function (r) { return r.text(); }).then(function (html) {
         var top = html.split('Cast And Crew')[0];
@@ -131,9 +121,7 @@ function getStreams(tmdbId, mediaType) {
         });
       });
     });
-  }).catch(function (e) {
-    return [{ name: 'DBG', title: 'ERR: ' + e, url: 'http://0.0.0.0/err', quality: 'DBG', provider: 'dflix' }];
-  });
+  }).catch(function () { return []; });
 }
 
 module.exports = { getStreams: getStreams };
