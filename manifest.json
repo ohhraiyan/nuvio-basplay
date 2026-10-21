@@ -1,6 +1,6 @@
 {
-  "name": "BAS PLAY",
-  "version": "1.1.0",
+  "name": "BAS PLAY + DFLIX",
+  "version": "1.2.0",
   "scrapers": [
     {
       "id": "basplay",
@@ -18,7 +18,7 @@
       "id": "dflix",
       "name": "DFLIX",
       "description": "Direct streams from DFLIX (discoveryftp)",
-      "version": "1.0.0",
+      "version": "1.0.4",
       "author": "ohhraiyan",
       "supportedTypes": ["movie"],
       "filename": "providers/dflix.js",
